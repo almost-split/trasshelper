@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import tkinter as tk
+import tkinter.ttk as ttk
 
 
 class AffTransform(object):
@@ -37,13 +39,13 @@ class AffTransform(object):
             return ArcSegment(
                 self * other.center,
                 other.radius,
-                np.fmod(other.start_angle + self.angle(), 360.0),
+                np.remainder(other.start_angle + self.angle(), 360.0),
                 other.running_angle,
             )
         elif isinstance(other, Clothoid):
             return Clothoid(
                 self * other.start,
-                np.fmod(other.angle + self.angle(), 360.0),
+                np.remainder(other.angle + self.angle(), 360.0),
                 other.radius,
                 other.length,
             )
@@ -110,6 +112,7 @@ class ArcSegment(object):
         start_angle: float,
         running_angle: float,
     ):
+        print(center, radius, start_angle, running_angle)
         assert center.shape == (2,)
         assert radius > 0
         assert start_angle >= 0 and start_angle < 360
@@ -146,12 +149,14 @@ class ArcSegment(object):
         ax.plot(xs, ys)
 
     def flip(self):
-        self.__start_angle = np.fmod(self.start_angle + self.running_angle, 360.0)
+        self.__start_angle = np.remainder(self.start_angle + self.running_angle, 360.0)
         self.__running_angle *= -1
 
 
 class Clothoid(object):
     def __init__(self, start: np.ndarray, angle: float, radius: float, length: float):
+        if angle > 180.0:
+            angle -= 360.0
         assert start.shape == (2,)
         assert angle >= -180.0 and angle <= 180.0
         assert radius != 0
@@ -184,7 +189,7 @@ class Clothoid(object):
     # x-polynomial parametrized by length normalized with tangent at origin in +x direction
     @staticmethod
     def x_polynomial(radius: float, length: float):
-        a = np.sqrt(radius * length)
+        a = np.sqrt(np.abs(radius) * length)
         return np.polynomial.Polynomial(
             [
                 0,
@@ -211,8 +216,8 @@ class Clothoid(object):
     # y-polynomial parametrized by length normalized with tangent at origin in +x direction
     @staticmethod
     def y_polynomial(radius: float, length: float):
-        a = np.sqrt(radius * length)
-        return np.polynomial.Polynomial(
+        a = np.sqrt(np.abs(radius) * length)
+        return np.sign(radius) * np.polynomial.Polynomial(
             [
                 0,
                 0,
@@ -295,15 +300,79 @@ class Clothoid(object):
             np.array([end_x - x_length, 0]), 0, clot_radius, length
         )
 
-# TODO: Replace these hard-coded values by some form of user interface
-line = LineSegment(np.array([-577.8956, 1001.6480]), np.array([-1493.3690, 739.7737]))
-arc = ArcSegment(np.array([-1544.4710, 315.4250]), 392, 143.02500, -28.36815)
-clot = Clothoid.find_clothoid(line, arc)
+class TrassHelperWindow(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("TrassHelper")
 
-print(clot)
+        
+        self.build_gui()
 
-fig, ax = plt.subplots()
-line.plot(ax)
-arc.plot(ax)
-clot.plot(ax)
-plt.show()
+    def build_gui(self):
+        window_frame = tk.Frame(self)
+        window_frame.pack(pady=5, padx=5)
+
+        line_arc_label = ttk.Label(window_frame, text="Line - Clothoid - Arc")
+        line_arc_label.pack(pady=5)
+
+        line_arc_frame = tk.Frame(window_frame)
+        line_arc_frame.pack(pady=5)
+
+        line_start_label_east = ttk.Label(line_arc_frame, text="Line Start East")
+        line_start_label_east.grid(row=0, column=0)
+        line_start_label_north = ttk.Label(line_arc_frame, text="Line Start North")
+        line_start_label_north.grid(row=0, column=1)
+        line_sep_label = ttk.Label(line_arc_frame, text=" ")
+        line_sep_label.grid(row=0, column=2)
+        line_end_label_east = ttk.Label(line_arc_frame, text="Line End East")
+        line_end_label_east.grid(row=0, column=3)
+        line_end_label_north = ttk.Label(line_arc_frame, text="Line End North")
+        line_end_label_north.grid(row=0, column=4)
+
+        self.line_start_entry_east = ttk.Entry(line_arc_frame)
+        self.line_start_entry_east.grid(row=1, column=0)
+        self.line_start_entry_north = ttk.Entry(line_arc_frame)
+        self.line_start_entry_north.grid(row=1, column=1)
+        self.line_end_entry_east = ttk.Entry(line_arc_frame)
+        self.line_end_entry_east.grid(row=1, column=3)
+        self.line_end_entry_north = ttk.Entry(line_arc_frame)
+        self.line_end_entry_north.grid(row=1, column=4)
+        
+        arc_center_label_east = ttk.Label(line_arc_frame, text="Arc Center East")
+        arc_center_label_east.grid(row=2, column=0)
+        arc_center_label_north = ttk.Label(line_arc_frame, text="Arc Center North")
+        arc_center_label_north.grid(row=2, column=1)
+        arc_sep_label = ttk.Label(line_arc_frame, text=" ")
+        arc_sep_label.grid(row=2, column=2)
+        arc_radius_label = ttk.Label(line_arc_frame, text="Arc Radius")
+        arc_radius_label.grid(row=2, column=3)
+
+        self.arc_center_entry_east = ttk.Entry(line_arc_frame)
+        self.arc_center_entry_east.grid(row=3, column=0)
+        self.arc_center_entry_north = ttk.Entry(line_arc_frame)
+        self.arc_center_entry_north.grid(row=3, column=1)
+        self.arc_radius_entry = ttk.Entry(line_arc_frame)
+        self.arc_radius_entry.grid(row=3, column=3)
+        
+        compute_button = ttk.Button(window_frame, text="Compute", width=20, command=self.compute)
+        compute_button.pack(pady=5)
+
+    def compute(self):
+        line = LineSegment(np.array([float(self.line_start_entry_east.get()), float(self.line_start_entry_north.get())]),
+                           np.array([float(self.line_end_entry_east.get()), float(self.line_end_entry_north.get())]))
+        arc = ArcSegment(np.array([float(self.arc_center_entry_east.get()), float(self.arc_center_entry_north.get())]),
+                           float(self.arc_radius_entry.get()), 0, 360)
+        clot = Clothoid.find_clothoid(line, arc)
+        
+        print(clot)
+        
+        fig, ax = plt.subplots()
+        line.plot(ax)
+        arc.plot(ax)
+        clot.plot(ax)
+        ax.set_aspect('equal')
+        plt.show()
+
+if __name__ == "__main__":
+    app = TrassHelperWindow()
+    app.mainloop()
