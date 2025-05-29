@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
 import tkinter.ttk as ttk
+import tkinter.filedialog as tkfd
+import xml.etree.ElementTree as xmlet
 
 
 class AffTransform(object):
@@ -112,10 +114,8 @@ class ArcSegment(object):
         start_angle: float,
         running_angle: float,
     ):
-        print(center, radius, start_angle, running_angle)
         assert center.shape == (2,)
         assert radius > 0
-        assert start_angle >= 0 and start_angle < 360
         assert running_angle != 0
 
         self.__center = center
@@ -186,7 +186,8 @@ class Clothoid(object):
     def length(self):
         return self.__length
 
-    # x-polynomial parametrized by length normalized with tangent at origin in +x direction
+    # x-polynomial of unit clothoid parametrized by length normalized with
+    # tangent at origin in +x direction
     @staticmethod
     def x_polynomial(radius: float, length: float):
         a = np.sqrt(np.abs(radius) * length)
@@ -213,7 +214,8 @@ class Clothoid(object):
             ]
         )
 
-    # y-polynomial parametrized by length normalized with tangent at origin in +x direction
+    # y-polynomial of unit clothoid parametrized by length normalized with
+    # tangent at origin in +x direction
     @staticmethod
     def y_polynomial(radius: float, length: float):
         a = np.sqrt(np.abs(radius) * length)
@@ -247,7 +249,7 @@ class Clothoid(object):
         afft = AffTransform.rotation_from_angle(self.angle)
         xys = np.matmul(
             afft.rotation,
-            np.row_stack(
+            np.vstack(
                 [
                     self.x_polynomial(self.radius, self.length)(ls),
                     self.y_polynomial(self.radius, self.length)(ls),
@@ -257,122 +259,269 @@ class Clothoid(object):
         ax.plot(xys[0] + self.start[0], xys[1] + self.start[1])
 
     @staticmethod
-    def find_clothoid(line: LineSegment, arc: ArcSegment):
-        # First, transform such that the line is at the x-axis
-        transform = AffTransform.rotation_from_angle(-line.angle())
-        transform = AffTransform(transform.rotation, -(transform * line).target)
-        transformed_arc = transform * arc
+    def compute_unit_clothoid_from_line(radius: float, center_y: float):
+        """Computes a unit clothoid and center_x of arc segment
 
-        if transformed_arc.center[1] > 0:
-            target_cy = transformed_arc.center[1]
-            clot_radius = arc.radius
-        else:
-            target_cy = -transformed_arc.center[1]
-            clot_radius = -arc.radius
+        The computed unit clothoid transitions from x-axis in +x direction to
+        an arc segment with radius whose center has the y-coordinate center_y
 
-        # interval method
-        interval = [1, 100]
+        Assume both radius and center_y to be positive
+        """
+        assert radius > 0
+        assert center_y > 0
 
-        def cy_from_length(l: float):
-            return Clothoid.y_polynomial(clot_radius, l)(
-                l
-            ) + arc.radius * Clothoid.x_polynomial(clot_radius, l).deriv()(l)
+        def tangent_at_length(length: float):
+            deriv = np.array([
+                Clothoid.x_polynomial(radius, length).deriv()(length),
+                Clothoid.y_polynomial(radius, length).deriv()(length),
+            ])
+            return deriv / np.linalg.norm(deriv)
 
-        while cy_from_length(interval[1]) < target_cy:
-            interval[1] *= 2
-        while interval[1] - interval[0] > 0.01:
+        # Find the length using nested intervals
+        # First, consider the following target function which computes the
+        # arc's center y-coordinate from clothoid length
+        def target_function(length: float):
+            # y-coordinate of clothoid end
+            return Clothoid.y_polynomial(radius, length)(
+                length
+            # y-coordinate of segment from arc center to arc point via
+            # tangent of clothoid end
+            ) + radius * tangent_at_length(length)[0]
+        interval = [1.0, 2.0]
+
+        # Increase upper bound of interval until we surpass center_y
+        while target_function(interval[1]) < center_y:
+            interval[1] *= 2.0
+        while interval[1] - interval[0] > 0.0001:
             median = 0.5 * (interval[0] + interval[1])
-            median_cy = cy_from_length(median)
-            if median_cy > target_cy:
+            median_target = target_function(median)
+            if median_target > center_y:
                 interval[1] = median
-            elif median_cy < target_cy:
+            elif median_target < center_y:
                 interval[0] = median
         length = 0.5 * (interval[0] + interval[1])
 
-        start_angle = np.arctan2(
-            -Clothoid.x_polynomial(clot_radius, length).deriv()(length),
-            Clothoid.y_polynomial(clot_radius, length).deriv()(length),
-        )
-        end_x = transformed_arc.center[0] + transformed_arc.radius * np.cos(start_angle)
-        x_length = Clothoid.x_polynomial(clot_radius, length)(length)
 
-        return transform.inverse() * Clothoid(
-            np.array([end_x - x_length, 0]), 0, clot_radius, length
-        )
+        # Compute center_x using x-coordinate of clothoid end and then
+        # via tangent
+        center_x = Clothoid.x_polynomial(radius, length)(
+                length
+        ) - radius * tangent_at_length(length)[1]
+        return Clothoid(np.array([0.0, 0.0]), 0.0, radius, length), center_x
+
+    @staticmethod
+    def compute_unit_clothoid_two_circles(radius1: float, radius2: float,
+                                          distance: float):
+        """Computes a unit clothoid such that the clothoid segment from radius1
+        to radius2 has curvature centers with the given distance
+
+        Also returns the two centers
+
+        The computed unit clothoid transitions from x-axis in +x direction to
+        an arc segment with radius whose center has the y-coordinate center_y
+
+        Assumes all parameters to be positive and radius1 > radius2
+        """
+        assert radius1 > 0
+        assert radius2 > 0
+        assert distance > 0
+        assert radius1 > radius2
+
+        def compute_centers(length: float):
+            x_poly = Clothoid.x_polynomial(radius2, length)
+            y_poly = Clothoid.y_polynomial(radius2, length)
+
+            length1 = length * (radius2 / radius1)
+            deriv_length1 = np.array([x_poly.deriv()(length1),
+                                      y_poly.deriv()(length1)])
+            deriv_length1 /= np.linalg.norm(deriv_length1)
+            center1 = np.array([
+                x_poly(length1) - radius1 * deriv_length1[1],
+                y_poly(length1) + radius1 * deriv_length1[0],
+            ])
+            deriv_length = np.array([x_poly.deriv()(length),
+                                     y_poly.deriv()(length)])
+            deriv_length /= np.linalg.norm(deriv_length)
+            center2 = np.array([
+                x_poly(length) - radius2 * deriv_length[1],
+                y_poly(length) + radius2 * deriv_length[0],
+            ])
+            return center1, center2
+
+
+        # Find the length using nested intervals
+        # First, consider the following target function which computes the
+        # requires distance
+        def target_function(length: float):
+            center1, center2 = compute_centers(length)
+            return np.linalg.norm(center1 - center2)
+
+        interval = [0.1, 2.0]
+
+        # Increase upper bound of interval until we surpass center_y
+        while target_function(interval[1]) < distance:
+            interval[1] *= 2.0
+        while interval[1] - interval[0] > 0.0001:
+            median = 0.5 * (interval[0] + interval[1])
+            median_target = target_function(median)
+            if median_target > distance:
+                interval[1] = median
+            elif median_target < distance:
+                interval[0] = median
+        length = 0.5 * (interval[0] + interval[1])
+
+        center1, center2 = compute_centers(length)
+        clothoid = Clothoid(np.array([0.0, 0.0]), 0.0, radius2, length)
+        return clothoid, center1, center2
 
 class TrassHelperWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TrassHelper")
+        self.geometry('240x120')
 
-        
         self.build_gui()
 
     def build_gui(self):
         window_frame = tk.Frame(self)
         window_frame.pack(pady=5, padx=5)
 
-        line_arc_label = ttk.Label(window_frame, text="Line - Clothoid - Arc")
-        line_arc_label.pack(pady=5)
+        st2_button = ttk.Button(window_frame, text="Choose st2-file", command=self.open_st2)
+        st2_button.pack()
 
-        line_arc_frame = tk.Frame(window_frame)
-        line_arc_frame.pack(pady=5)
+        self.st2_status_label = ttk.Label(window_frame, text="No file loaded")
+        self.st2_status_label.pack()
 
-        line_start_label_east = ttk.Label(line_arc_frame, text="Line Start East")
-        line_start_label_east.grid(row=0, column=0)
-        line_start_label_north = ttk.Label(line_arc_frame, text="Line Start North")
-        line_start_label_north.grid(row=0, column=1)
-        line_sep_label = ttk.Label(line_arc_frame, text=" ")
-        line_sep_label.grid(row=0, column=2)
-        line_end_label_east = ttk.Label(line_arc_frame, text="Line End East")
-        line_end_label_east.grid(row=0, column=3)
-        line_end_label_north = ttk.Label(line_arc_frame, text="Line End North")
-        line_end_label_north.grid(row=0, column=4)
+        input_frame = tk.Frame(window_frame)
+        input_frame.pack()
 
-        self.line_start_entry_east = ttk.Entry(line_arc_frame)
-        self.line_start_entry_east.grid(row=1, column=0)
-        self.line_start_entry_north = ttk.Entry(line_arc_frame)
-        self.line_start_entry_north.grid(row=1, column=1)
-        self.line_end_entry_east = ttk.Entry(line_arc_frame)
-        self.line_end_entry_east.grid(row=1, column=3)
-        self.line_end_entry_north = ttk.Entry(line_arc_frame)
-        self.line_end_entry_north.grid(row=1, column=4)
-        
-        arc_center_label_east = ttk.Label(line_arc_frame, text="Arc Center East")
-        arc_center_label_east.grid(row=2, column=0)
-        arc_center_label_north = ttk.Label(line_arc_frame, text="Arc Center North")
-        arc_center_label_north.grid(row=2, column=1)
-        arc_sep_label = ttk.Label(line_arc_frame, text=" ")
-        arc_sep_label.grid(row=2, column=2)
-        arc_radius_label = ttk.Label(line_arc_frame, text="Arc Radius")
-        arc_radius_label.grid(row=2, column=3)
+        seg_a_label = ttk.Label(input_frame, text="Segment A:", justify="right")
+        seg_a_label.grid(row=1, column=0)
+        self.seg_a_entry = ttk.Entry(input_frame, width=3, justify="right")
+        self.seg_a_entry.grid(row=1, column=1)
+        seg_a_connlabel = ttk.Label(input_frame, text="Connector:", justify="right")
+        seg_a_connlabel.grid(row=1, column=2)
+        self.seg_a_connector = ttk.Combobox(input_frame, width=2)
+        self.seg_a_connector['values'] = ['0', '1']
+        self.seg_a_connector['state'] = 'readonly'
+        self.seg_a_connector.grid(row=1, column=3)
 
-        self.arc_center_entry_east = ttk.Entry(line_arc_frame)
-        self.arc_center_entry_east.grid(row=3, column=0)
-        self.arc_center_entry_north = ttk.Entry(line_arc_frame)
-        self.arc_center_entry_north.grid(row=3, column=1)
-        self.arc_radius_entry = ttk.Entry(line_arc_frame)
-        self.arc_radius_entry.grid(row=3, column=3)
-        
-        compute_button = ttk.Button(window_frame, text="Compute", width=20, command=self.compute)
-        compute_button.pack(pady=5)
+        seg_b_label = ttk.Label(input_frame, text="Segment B:", justify="right")
+        seg_b_label.grid(row=2, column=0)
+        self.seg_b_entry = ttk.Entry(input_frame, width=3, justify="right")
+        self.seg_b_entry.grid(row=2, column=1)
+        seg_b_connlabel = ttk.Label(input_frame, text="Connector:", justify="right")
+        seg_b_connlabel.grid(row=2, column=2)
+        self.seg_b_connector = ttk.Combobox(input_frame, width=2)
+        self.seg_b_connector['values'] = ['0', '1']
+        self.seg_b_connector['state'] = 'readonly'
+        self.seg_b_connector.grid(row=2, column=3)
 
-    def compute(self):
-        line = LineSegment(np.array([float(self.line_start_entry_east.get()), float(self.line_start_entry_north.get())]),
-                           np.array([float(self.line_end_entry_east.get()), float(self.line_end_entry_north.get())]))
-        arc = ArcSegment(np.array([float(self.arc_center_entry_east.get()), float(self.arc_center_entry_north.get())]),
-                           float(self.arc_radius_entry.get()), 0, 360)
-        clot = Clothoid.find_clothoid(line, arc)
-        
-        print(clot)
-        
+        compute_button = ttk.Button(window_frame, text="Compute",
+                                    command=self.compute_clothoid)
+        compute_button.pack()
+
+    def open_st2(self):
+        filename = tkfd.askopenfilename()
+        if len(filename) == 0:
+            return
+        tree = xmlet.ElementTree()
+        tree.parse(filename)
+        lageplan = tree.find("Gleisplan/Lageplan")
+        def st2_xml_child_to_segment(child):
+            if child.tag == "UTM":
+                 return None
+            elif child.tag == "Gerade":
+                line_start = np.array([float(child[0].attrib["X"]),
+                                       float(child[0].attrib["Y"])])
+                line_end = np.array([float(child[1].attrib["X"]),
+                                     float(child[1].attrib["Y"])])
+                return LineSegment(line_start, line_end)
+            elif child.tag == "Kreisbogen":
+                radius = 1.0 / float(child.attrib["kr"])
+                center = np.array([float(child[2].attrib["X"]),
+                                   float(child[2].attrib["Y"])])
+                start_angle = np.rad2deg(float(child.attrib["WinkelAnf"]))
+                running_angle = np.rad2deg(float(child.attrib["WinkelLauf"]))
+                return ArcSegment(center, radius, start_angle, running_angle)
+            elif child.tag == "Klothoide":
+                start = np.array([float(child[0].attrib["X"]),
+                                  float(child[0].attrib["Y"])])
+                angle = np.rad2deg(float(child[0].attrib["W"]))
+                radius = float(child.attrib["R"])
+                length = float(child.attrib["L"])
+                return Clothoid(start, angle, radius, length)
+            else:
+                raise "Not implemented"
+        self.segments = list(filter(lambda x: x != None,
+                                    map(st2_xml_child_to_segment, lageplan)))
+        self.st2_status_label['text'] = f"Loaded st2-file with {len(self.segments)} segments"
+
+    def compute_clothoid(self):
+        seg_a_index = int(self.seg_a_entry.get()) - 1
+        seg_a_conn = int(self.seg_a_connector.get())
+        seg_b_index = int(self.seg_b_entry.get()) - 1
+        seg_b_conn = int(self.seg_b_connector.get())
+
+        seg_a = self.segments[seg_a_index]
+        seg_b = self.segments[seg_b_index]
+        if seg_a_conn == 0:
+            seg_a.flip()
+        if seg_b_conn == 1:
+            seg_b.flip()
+        if isinstance(seg_a, LineSegment) and isinstance(seg_b, ArcSegment):
+            transform = AffTransform.rotation_from_angle(-seg_a.angle())
+            transform = AffTransform(transform.rotation, -(transform *
+                                                           seg_a).target)
+            transformed_arc = transform * seg_b
+            if transformed_arc.center[1] > 0:
+                clothoid, center_x = Clothoid.compute_unit_clothoid_from_line(
+                    transformed_arc.radius, transformed_arc.center[1]
+                )
+            else:
+                clothoid, center_x = Clothoid.compute_unit_clothoid_from_line(
+                    transformed_arc.radius, -transformed_arc.center[1]
+                )
+                clothoid = Clothoid(np.array([0, 0]), 0, -clothoid.radius,
+                                             clothoid.length)
+            clothoid = AffTransform(np.array([[1, 0], [0, 1]]), np.array([
+                transformed_arc.center[0] - center_x, 0
+            ])) * clothoid
+            clothoid = transform.inverse() * clothoid
+                
+        elif isinstance(seg_a, ArcSegment) and isinstance(seg_b,
+                                                          ArcSegment):
+            clothoid, center1, center2 = Clothoid.compute_unit_clothoid_two_circles(
+                seg_a.radius, seg_b.radius, np.linalg.norm(seg_a.center -
+                                                           seg_b.center)
+            )
+            if seg_a.running_angle < 0:
+                clothoid = clothoid = Clothoid(np.array([0, 0]), 0, -clothoid.radius,
+                                             clothoid.length)
+                center1[1] *= -1
+                center2[1] *= -1
+            clothoid = AffTransform(np.array([[1, 0], [0, 1]]), -center1) * clothoid
+            rot_transform = AffTransform.rotation_from_angle(
+                LineSegment(seg_a.center, seg_b.center).angle() - LineSegment(
+                    center1, center2).angle()
+            )
+            clothoid = rot_transform * clothoid
+            clothoid = AffTransform(np.array([[1, 0], [0, 1]]), seg_a.center) * clothoid
+        else:
+            raise ValueError("Cannot connect these segments")
+
+        print(clothoid)
         fig, ax = plt.subplots()
-        line.plot(ax)
-        arc.plot(ax)
-        clot.plot(ax)
+        seg_a.plot(ax)
+        seg_b.plot(ax)
+        clothoid.plot(ax)
         ax.set_aspect('equal')
         plt.show()
+
+
+
 
 if __name__ == "__main__":
     app = TrassHelperWindow()
     app.mainloop()
+
